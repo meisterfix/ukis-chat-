@@ -219,11 +219,14 @@ const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && win
 const native = isNative ? window.Capacitor.registerPlugin('TorChat') : null;
 const AppPlugin = isNative ? window.Capacitor.registerPlugin('App') : null;
 
+// Jede Verbindung hat eine Nummer (conn). Erst wenn über eine Verbindung ein gültig verschlüsseltes
+// Paket ankommt, wird sie zur aktiven Verbindung; alle anderen werden geschlossen. So kann ein Fremder,
+// der die Tor-Adresse kennt, den Kanal weder übernehmen noch stören.
 function makeNativeTransport() {
   const handlers = { data: () => {}, state: () => {}, progress: () => {} };
   let started = null;
-  native.addListener('data', (ev) => handlers.data(unb64(ev.data)));
-  native.addListener('state', (ev) => handlers.state(ev.state));
+  native.addListener('data', (ev) => handlers.data(unb64(ev.data), ev.conn));
+  native.addListener('state', (ev) => handlers.state(ev.state, ev.conn));
   native.addListener('progress', (ev) => handlers.progress(ev.progress, ev.summary || ''));
   return {
     name: 'tor',
@@ -236,7 +239,9 @@ function makeNativeTransport() {
     },
     async listen() { await native.listen(); },
     async connect(addr) { await native.connect({ address: addr }); },
-    async send(bytes, notify) { await native.send({ data: b64(bytes), notify: !!notify }); },
+    async send(bytes, notify, conn) { await native.send({ data: b64(bytes), notify: !!notify, conn }); },
+    async promote(conn) { await native.promote({ conn }); },
+    async drop(conn) { await native.drop({ conn }); },
     async close() { await native.closeConnection(); },
     async shutdown() { started = null; await native.stop(); },
   };
@@ -246,15 +251,27 @@ function makeLoopbackTransport() {
   const handlers = { data: () => {}, state: () => {}, progress: () => {} };
   const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('siegel-dev') : null;
   let me = null;
-  let peer = null;
+  const conns = new Map(); // conn -> Adresse der Gegenseite
+  let nextId = 1;
+  const idFor = (addr) => { for (const [id, a] of conns) if (a === addr) return id; return null; };
   if (bc) {
     bc.onmessage = (ev) => {
       const m = ev.data;
-      if (!me || m.to !== me) return;
-      if (m.t === 'hello') { peer = m.from; bc.postMessage({ t: 'welcome', to: peer, from: me }); handlers.state('connected'); }
-      else if (m.t === 'welcome') { handlers.state('connected'); }
-      else if (m.t === 'data' && m.from === peer) handlers.data(new Uint8Array(m.d));
-      else if (m.t === 'bye' && m.from === peer) { peer = null; handlers.state('disconnected'); }
+      if (!me || !m || m.to !== me) return;
+      if (m.t === 'hello') {
+        const id = nextId++; conns.set(id, m.from);
+        bc.postMessage({ t: 'welcome', to: m.from, from: me });
+        handlers.state('connected', id);
+      } else if (m.t === 'welcome') {
+        const id = idFor(m.from);
+        if (id) handlers.state('connected', id);
+      } else if (m.t === 'data') {
+        const id = idFor(m.from);
+        if (id) handlers.data(new Uint8Array(m.d), id);
+      } else if (m.t === 'bye') {
+        const id = idFor(m.from);
+        if (id) { conns.delete(id); handlers.state('disconnected', id); }
+      }
     };
   }
   return {
@@ -268,9 +285,15 @@ function makeLoopbackTransport() {
       return me;
     },
     async listen() {},
-    async connect(addr) { peer = addr; bc.postMessage({ t: 'hello', to: addr, from: me }); },
-    async send(bytes) { if (peer) bc.postMessage({ t: 'data', to: peer, from: me, d: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }); },
-    async close() { if (peer) bc.postMessage({ t: 'bye', to: peer, from: me }); peer = null; },
+    async connect(addr) { const id = nextId++; conns.set(id, addr); bc.postMessage({ t: 'hello', to: addr, from: me }); },
+    async send(bytes, notify, conn) {
+      const to = conns.get(conn);
+      if (!to) throw new Error('nicht verbunden');
+      bc.postMessage({ t: 'data', to, from: me, d: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
+    },
+    async promote(conn) { for (const [id, a] of [...conns]) if (id !== conn) { bc.postMessage({ t: 'bye', to: a, from: me }); conns.delete(id); } },
+    async drop(conn) { const a = conns.get(conn); if (a) { bc.postMessage({ t: 'bye', to: a, from: me }); conns.delete(conn); } },
+    async close() { for (const a of conns.values()) bc.postMessage({ t: 'bye', to: a, from: me }); conns.clear(); },
     async shutdown() { await this.close(); me = null; },
   };
 }
@@ -401,7 +424,11 @@ function newChannel(role, channelPw) {
     messages: [],         // {id, el, expires, urls:[]}
     outbox: new Map(),    // id -> payload-Objekt (bis zur Bestätigung)
     seen: new Set(),
-    rx: null,             // laufender Empfang großer Pakete
+    rx: new Map(),        // laufender Empfang großer Pakete je Verbindung
+    pending: new Map(),   // Verbindungen, die sich noch nicht ausgewiesen haben
+    active: null,         // bestätigte Verbindung zum Partner
+    lastRx: 0,
+    warned: false,
     reconnectTimer: null,
     createdAt: Date.now(),
   };
@@ -516,11 +543,9 @@ async function onScanned(text) {
 
 function connectToPeer() {
   const ch = channel;
-  if (!ch || ch.state === 'closed' || ch.role !== 'A') return;
+  if (!ch || ch.state === 'closed' || ch.role !== 'A' || ch.active) return;
   setChatState('verbinde …', true);
-  transport.connect(ch.peerAddr).catch(() => {
-    scheduleReconnect();
-  });
+  transport.connect(ch.peerAddr).catch(() => scheduleReconnect());
 }
 function scheduleReconnect() {
   const ch = channel;
@@ -529,54 +554,92 @@ function scheduleReconnect() {
   ch.reconnectTimer = setTimeout(connectToPeer, 8000);
 }
 
-transport.onState(async (state) => {
+transport.onState((state, conn) => {
   const ch = channel;
-  if (!ch || ch.state === 'closed') return;
+  if (!ch || ch.state === 'closed' || !ch.keys) return;
   if (state === 'connected') {
-    if (!ch.keys) return;
-    if (ch.state !== 'open') openChat();
-    setChatState('verbunden', false);
-    await sendControl({ type: 'hello' });
-    // Unbestätigte Nachrichten erneut senden
-    for (const p of ch.outbox.values()) sendPayload(p, false);
+    // Noch nicht vertrauenswürdig: Hallo schicken und auf ein gültiges Paket der Gegenseite warten.
+    ch.pending.set(conn, { fails: 0, since: Date.now() });
+    enqueue({ head: { type: 'hello', id: randId() }, body: null, notify: false, conn });
+    setTimeout(() => {
+      if (channel === ch && ch.pending.has(conn)) { ch.pending.delete(conn); transport.drop(conn).catch(() => {}); }
+    }, 60000);
   } else if (state === 'disconnected') {
-    setChatState('getrennt, verbinde neu …', true);
-    scheduleReconnect();
+    ch.pending.delete(conn);
+    ch.rx.delete(conn);
+    if (ch.active === conn) {
+      ch.active = null;
+      setChatState('getrennt, verbinde neu …', true);
+      scheduleReconnect();
+    }
   }
 });
 
 // ---------------------------------------------------------------- Übertragung (Rahmen)
 // Rahmen: [typ 1 Byte][...]. typ 0 = ganzes Paket, 1 = Anfang (Gesamtlänge 4 Byte), 2 = Fortsetzung
-async function sendPacket(packet, notify) {
+async function sendPacket(packet, notify, conn) {
   const F = CFG.FRAME_BYTES;
-  if (packet.length <= F) { await transport.send(concat(new Uint8Array([0]), packet), notify); return; }
-  await transport.send(concat(new Uint8Array([1]), u32(packet.length), packet.subarray(0, F)), false);
+  if (packet.length <= F) { await transport.send(concat(new Uint8Array([0]), packet), notify, conn); return; }
+  await transport.send(concat(new Uint8Array([1]), u32(packet.length), packet.subarray(0, F)), false, conn);
   for (let o = F; o < packet.length; o += F) {
     const last = o + F >= packet.length;
-    await transport.send(concat(new Uint8Array([2]), packet.subarray(o, o + F)), last && notify);
+    await transport.send(concat(new Uint8Array([2]), packet.subarray(o, o + F)), last && notify, conn);
   }
 }
 
-transport.onData(async (frame) => {
+// Empfang strikt nacheinander, damit die Schlüsselkette nie durcheinanderkommt.
+let rxChain = Promise.resolve();
+transport.onData((frame, conn) => {
+  rxChain = rxChain.then(() => onFrame(frame, conn)).catch(() => {});
+});
+
+async function onFrame(frame, conn) {
   const ch = channel;
   if (!ch || !ch.keys || frame.length < 1) return;
+  if (ch.active && conn !== ch.active && !ch.pending.has(conn)) return;
+  let st = ch.rx.get(conn);
   const t = frame[0];
-  if (t === 0) return handlePacket(frame.subarray(1));
-  if (t === 1) {
+  if (t === 0) return handlePacket(frame.subarray(1), conn);
+  if (t === 1 && frame.length >= 5) {
     const total = readU32(frame, 1);
-    if (total > CFG.MAX_FILE_BYTES * 1.5) { ch.rx = null; return; }
-    ch.rx = { buf: new Uint8Array(total), off: 0 };
+    if (total > CFG.MAX_FILE_BYTES + 65536) { ch.rx.delete(conn); return rejectFrom(conn); }
+    st = { buf: new Uint8Array(total), off: 0 };
+    ch.rx.set(conn, st);
     const part = frame.subarray(5);
-    ch.rx.buf.set(part, 0); ch.rx.off = part.length;
+    if (part.length > total) { ch.rx.delete(conn); return rejectFrom(conn); }
+    st.buf.set(part, 0); st.off = part.length;
     return;
   }
-  if (t === 2 && ch.rx) {
+  if (t === 2 && st) {
     const part = frame.subarray(1);
-    if (ch.rx.off + part.length > ch.rx.buf.length) { ch.rx = null; return; }
-    ch.rx.buf.set(part, ch.rx.off); ch.rx.off += part.length;
-    if (ch.rx.off === ch.rx.buf.length) { const p = ch.rx.buf; ch.rx = null; return handlePacket(p); }
+    if (st.off + part.length > st.buf.length) { ch.rx.delete(conn); return rejectFrom(conn); }
+    st.buf.set(part, st.off); st.off += part.length;
+    if (st.off === st.buf.length) { ch.rx.delete(conn); return handlePacket(st.buf, conn); }
+    return;
   }
-});
+  return rejectFrom(conn);
+}
+
+// Ungültige Daten: Verbindung nach 3 Fehlern trennen. Der Kanal selbst bleibt bestehen.
+function rejectFrom(conn) {
+  const ch = channel;
+  if (!ch) return;
+  const p = ch.pending.get(conn);
+  if (p) {
+    p.fails++;
+    if (!ch.verified && !ch.warned) {
+      ch.warned = true;
+      const txt = 'Verbindung abgelehnt: Das Kanal-Passwort ist bei euch verschieden, oder ein Fremder versucht sich einzuklinken. Bitte zurück und neu beginnen.';
+      if (currentScreen === 'screen-show') $('show-status').textContent = txt;
+      $('chat-banner').hidden = false;
+      $('chat-banner').textContent = txt;
+    }
+    if (p.fails >= 3) {
+      ch.pending.delete(conn);
+      transport.drop(conn).catch(() => {});
+    }
+  }
+}
 
 // Nutzlast: [Kopf-Länge 4 Byte][Kopf JSON][Datei-Bytes]
 function encodePayload(head, body) {
@@ -585,60 +648,81 @@ function encodePayload(head, body) {
 }
 function decodePayload(plain) {
   const hl = readU32(plain, 0);
+  if (hl > plain.length - 4 || hl > 65536) throw new Error('Kopf');
   const head = JSON.parse(dec.decode(plain.subarray(4, 4 + hl)));
+  if (!head || typeof head !== 'object' || typeof head.type !== 'string') throw new Error('Kopf');
   return { head, body: plain.subarray(4 + hl) };
 }
 
+// Senden strikt nacheinander (gleicher Grund wie beim Empfang).
 const sendQueue = [];
 let sending = false;
+let sendIdle = Promise.resolve();
+let sendIdleResolve = null;
+function enqueue(job) {
+  sendQueue.push(job);
+  pumpQueue();
+}
 async function pumpQueue() {
   if (sending) return;
   sending = true;
+  sendIdle = new Promise((r) => { sendIdleResolve = r; });
   try {
     while (sendQueue.length) {
       const job = sendQueue.shift();
       const ch = channel;
       if (!ch || !ch.keys || ch.state === 'closed') continue;
+      const conn = job.conn || ch.active;
+      if (!conn) continue; // nicht verbunden: bleibt im Postausgang und wird später erneut gesendet
       try {
         const packet = await encryptPayload(ch.keys, encodePayload(job.head, job.body));
-        await sendPacket(packet, job.notify);
+        await sendPacket(packet, job.notify, conn);
       } catch (e) { /* bei Verbindungsabbruch wird später erneut gesendet */ }
     }
-  } finally { sending = false; }
+  } finally { sending = false; if (sendIdleResolve) sendIdleResolve(); }
 }
 function sendPayload(p, track = true) {
   if (track && channel) channel.outbox.set(p.head.id, p);
-  sendQueue.push(p);
-  pumpQueue();
+  enqueue(p);
 }
-async function sendControl(head) {
-  sendQueue.push({ head, body: null, notify: false });
-  pumpQueue();
+function sendControl(head) {
+  enqueue({ head: { id: randId(), ...head }, body: null, notify: false });
 }
 
-async function handlePacket(packet) {
+async function handlePacket(packet, conn) {
   const ch = channel;
+  if (!ch || !ch.keys || packet.length < 17) return rejectFrom(conn);
   let plain;
-  try { plain = await decryptPayload(ch.keys, packet); } catch (e) {
-    if (!ch.verified) {
-      ch.verified = true; // nur einmal melden
-      await leaveChannel({ notify: false });
-      toast('Kanal geschlossen: Das Kanal-Passwort war bei euch verschieden, oder jemand hat sich eingemischt.', 6000);
-    }
-    return;
-  }
+  try { plain = await decryptPayload(ch.keys, packet); } catch (e) { return rejectFrom(conn); }
   let msg;
-  try { msg = decodePayload(plain); } catch (e) { return; }
+  try { msg = decodePayload(plain); } catch (e) { return rejectFrom(conn); }
   const { head, body } = msg;
-  if (!ch.verified) { ch.verified = true; setChatState('verbunden', false); }
+  // Gültig verschlüsselt: diese Verbindung gehört zum echten Partner.
+  if (ch.active !== conn) {
+    if (ch.state !== 'open') openChat();
+    ch.active = conn;
+    ch.pending.delete(conn);
+    transport.promote(conn).catch(() => {});
+    clearTimeout(ch.reconnectTimer);
+    setChatState('verbunden', false);
+    // Unbestätigte Nachrichten erneut senden
+    for (const p of ch.outbox.values()) enqueue(p);
+  }
+  ch.lastRx = Date.now();
+  if (!ch.verified) {
+    ch.verified = true;
+    if (ch.warned) $('chat-banner').textContent = 'Vergleicht die Symbole oben. Sind sie bei euch beiden gleich, hört niemand mit.';
+  }
   switch (head.type) {
-    case 'hello': return;
+    case 'hello': case 'ping': return;
     case 'ack': ch.outbox.delete(head.id); markDelivered(head.id); return;
     case 'bye':
       await leaveChannel({ notify: false });
       toast('Dein Partner hat den Kanal verlassen. Alles wurde gelöscht.', 4000);
       return;
     case 'text': case 'image': case 'audio': case 'file':
+      if (typeof head.id !== 'string' || head.id.length > 40) return;
+      if (head.type === 'text' && (typeof head.text !== 'string' || head.text.length > 20000)) return;
       sendControl({ type: 'ack', id: head.id });
       if (ch.seen.has(head.id)) return;
       ch.seen.add(head.id);
@@ -648,6 +732,20 @@ async function handlePacket(packet) {
     default:
   }
 }
+
+// Lebenszeichen: alle 20 Sekunden. Kommt 70 Sekunden lang nichts, wird neu verbunden.
+setInterval(() => {
+  const ch = channel;
+  if (!ch || !ch.keys || !ch.active || ch.state === 'closed') return;
+  sendControl({ type: 'ping' });
+  if (ch.lastRx && Date.now() - ch.lastRx > 70000) {
+    const dead = ch.active;
+    ch.active = null;
+    transport.drop(dead).catch(() => {});
+    setChatState('getrennt, verbinde neu …', true);
+    scheduleReconnect();
+  }
+}, 20000);
 
 // ---------------------------------------------------------------- Chat-Oberfläche
 function setChatState(text, warn) {
@@ -692,7 +790,10 @@ function renderMessage(m, body) {
     el.textContent = m.text;
     if (EMOJI_ONLY.test(m.text) && !/[0-9#*]/.test(m.text)) el.classList.add('big-emoji');
   } else {
-    const blob = new Blob([body], { type: safeMime(m.mime) });
+    if (m.type === 'image' && !SAFE_IMAGE.test(m.mime || '')) m = { ...m, type: 'file' };
+    if (m.type === 'audio' && !SAFE_AUDIO.test(m.mime || '')) m = { ...m, type: 'file' };
+    const shownMime = m.type === 'file' ? 'application/octet-stream' : safeMime(m.mime);
+    const blob = new Blob([body], { type: shownMime });
     const url = URL.createObjectURL(blob);
     urls.push(url);
     if (m.type === 'image') {
@@ -734,6 +835,10 @@ function markDelivered(id) {
   if (m) m.meta.textContent = m.meta.dataset.base + ' · zugestellt';
 }
 
+// Nur harmlose Bildformate werden als Bild angezeigt. SVG/HTML usw. gelten immer als Dokument
+// und werden nie im App-Fenster geöffnet (Schutz vor eingeschleustem Code).
+const SAFE_IMAGE = /^image\/(png|jpe?g|gif|webp)$/i;
+const SAFE_AUDIO = /^audio\/(webm|mp4|ogg|mpeg|aac|x-m4a)$/i;
 function safeMime(m) { return /^[a-z]+\/[a-z0-9.+-]+$/i.test(m || '') ? m : 'application/octet-stream'; }
 function fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
 
@@ -752,7 +857,7 @@ async function sendFile(file) {
   if (!file || !channel || !channel.keys) return;
   if (file.size > CFG.MAX_FILE_BYTES) { toast('Die Datei ist zu groß (höchstens 15 MB).'); return; }
   const body = new Uint8Array(await file.arrayBuffer());
-  const type = /^image\/(png|jpe?g|gif|webp|heic|heif)$/i.test(file.type) ? 'image' : 'file';
+  const type = SAFE_IMAGE.test(file.type) ? 'image' : 'file';
   const head = { type, id: randId(), name: file.name, mime: file.type || 'application/octet-stream' };
   renderMessage({ ...head, mine: true }, body);
   sendPayload({ head, body, notify: true });
@@ -775,10 +880,12 @@ setInterval(() => {
 async function leaveChannel({ notify = true, silent = false } = {}) {
   const ch = channel;
   if (!ch) return;
-  if (notify && ch.keys && ch.state === 'open') {
+  if (notify && ch.keys && ch.state === 'open' && ch.active) {
     try {
-      const packet = await encryptPayload(ch.keys, encodePayload({ type: 'bye', id: randId() }));
-      await sendPacket(packet, false);
+      sendQueue.length = 0;
+      await sendIdle; // laufende Sendung abwarten, damit die Schlüsselkette sauber bleibt
+      enqueue({ head: { type: 'bye', id: randId() }, body: null, notify: false });
+      await sendIdle;
       await sleep(300);
     } catch (e) { /* ignore */ }
   }
@@ -788,7 +895,7 @@ async function leaveChannel({ notify = true, silent = false } = {}) {
   ch.messages = [];
   ch.outbox.clear();
   if (ch.keys) { wipeBytes(ch.keys.send.chain); wipeBytes(ch.keys.recv.chain); ch.keys.recv.skipped.forEach(wipeBytes); }
-  ch.keys = null; ch.kp = null; ch.pw = null; ch.rx = null;
+  ch.keys = null; ch.kp = null; ch.pw = null; ch.rx.clear(); ch.pending.clear(); ch.active = null;
   sendQueue.length = 0;
   channel = null;
   $('messages').innerHTML = '';

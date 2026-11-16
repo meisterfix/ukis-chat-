@@ -45,6 +45,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -63,7 +65,6 @@ public class TorChatPlugin extends Plugin {
     private static final Pattern ONION = Pattern.compile("^[a-z2-7]{56}\\.onion$");
 
     private final ExecutorService io = Executors.newCachedThreadPool();
-    private final Object sendLock = new Object();
 
     private TorService torService;
     private ServiceConnection serviceConnection;
@@ -71,8 +72,21 @@ public class TorChatPlugin extends Plugin {
     private volatile boolean torOn = false;
     private volatile String onionHost;
     private volatile ServerSocket serverSocket;
-    private volatile Socket socket;
-    private volatile DataOutputStream out;
+    private static final int MAX_CONNS = 6;
+    private final AtomicInteger nextConn = new AtomicInteger(1);
+    private final Map<Integer, Conn> conns = new ConcurrentHashMap<>();
+    private volatile int activeConn = 0;
+
+    private static final class Conn {
+        final int id;
+        final Socket socket;
+        final DataOutputStream out;
+        Conn(int id, Socket s) throws IOException {
+            this.id = id;
+            this.socket = s;
+            this.out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 64 * 1024));
+        }
+    }
     private volatile boolean inForeground = true;
     private volatile PluginCall pendingStart;
     private volatile boolean progressRunning = false;
@@ -245,22 +259,29 @@ public class TorChatPlugin extends Plugin {
     }
 
     private void attach(Socket s) throws IOException {
+        if (conns.size() >= MAX_CONNS) {
+            try { s.close(); } catch (IOException ignored) { }
+            throw new IOException("Zu viele Verbindungen");
+        }
         s.setTcpNoDelay(true);
         s.setKeepAlive(true);
-        closeSocket(false);
-        synchronized (sendLock) {
-            socket = s;
-            out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 64 * 1024));
-        }
+        Conn c = new Conn(nextConn.getAndIncrement(), s);
+        conns.put(c.id, c);
         JSObject ev = new JSObject();
         ev.put("state", "connected");
+        ev.put("conn", c.id);
         notifyListeners("state", ev);
-        io.execute(() -> readLoop(s));
+        io.execute(() -> readLoop(c));
+        // Verbindungen, die sich nicht innerhalb von 60 Sekunden ausweisen, werden getrennt.
+        io.execute(() -> {
+            try { Thread.sleep(60000); } catch (InterruptedException ignored) { }
+            if (activeConn != c.id && conns.containsKey(c.id)) closeConn(c.id, true);
+        });
     }
 
-    private void readLoop(Socket s) {
+    private void readLoop(Conn c) {
         try {
-            DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream(), 64 * 1024));
+            DataInputStream in = new DataInputStream(new BufferedInputStream(c.socket.getInputStream(), 64 * 1024));
             while (true) {
                 int len = in.readInt();
                 if (len < 0 || len > MAX_FRAME) throw new IOException("Ungültiger Rahmen");
@@ -269,18 +290,47 @@ public class TorChatPlugin extends Plugin {
                 in.readFully(buf);
                 JSObject ev = new JSObject();
                 ev.put("data", Base64.encodeToString(buf, Base64.NO_WRAP));
+                ev.put("conn", c.id);
                 notifyListeners("data", ev);
-                if (notify && !inForeground) playSound();
+                if (notify && !inForeground && activeConn == c.id) playSound();
             }
         } catch (IOException e) {
             // Verbindung beendet
         }
-        if (socket == s) {
-            closeSocket(false);
+        closeConn(c.id, true);
+    }
+
+    private void closeConn(int id, boolean announce) {
+        Conn c = conns.remove(id);
+        if (c == null) return;
+        if (activeConn == id) activeConn = 0;
+        try { c.socket.close(); } catch (IOException ignored) { }
+        if (announce) {
             JSObject ev = new JSObject();
             ev.put("state", "disconnected");
+            ev.put("conn", id);
             notifyListeners("state", ev);
         }
+    }
+
+    private void closeAll() {
+        for (Integer id : conns.keySet()) closeConn(id, false);
+        activeConn = 0;
+    }
+
+    @PluginMethod
+    public void promote(PluginCall call) {
+        int id = call.getInt("conn", 0);
+        if (!conns.containsKey(id)) { call.reject("Unbekannte Verbindung"); return; }
+        activeConn = id;
+        for (Integer other : conns.keySet()) if (other != id) closeConn(other, false);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void drop(PluginCall call) {
+        closeConn(call.getInt("conn", 0), false);
+        call.resolve();
     }
 
     // ------------------------------------------------------------------ Senden
@@ -288,6 +338,7 @@ public class TorChatPlugin extends Plugin {
     public void send(PluginCall call) {
         String data = call.getString("data", "");
         boolean notify = Boolean.TRUE.equals(call.getBoolean("notify", false));
+        int id = call.getInt("conn", 0);
         byte[] bytes;
         try {
             bytes = Base64.decode(data, Base64.DEFAULT);
@@ -300,18 +351,18 @@ public class TorChatPlugin extends Plugin {
             return;
         }
         io.execute(() -> {
+            Conn c = conns.get(id);
             try {
-                synchronized (sendLock) {
-                    DataOutputStream o = out;
-                    if (o == null) throw new IOException("Nicht verbunden");
-                    o.writeInt(bytes.length);
-                    o.writeByte(notify ? 1 : 0);
-                    o.write(bytes);
-                    o.flush();
+                if (c == null) throw new IOException("Nicht verbunden");
+                synchronized (c) {
+                    c.out.writeInt(bytes.length);
+                    c.out.writeByte(notify ? 1 : 0);
+                    c.out.write(bytes);
+                    c.out.flush();
                 }
                 call.resolve();
             } catch (IOException e) {
-                closeSocket(true);
+                if (c != null) closeConn(c.id, true);
                 call.reject("Senden fehlgeschlagen");
             }
         });
@@ -319,26 +370,9 @@ public class TorChatPlugin extends Plugin {
 
     @PluginMethod
     public void closeConnection(PluginCall call) {
-        closeSocket(false);
+        closeAll();
         clearSharedFiles();
         call.resolve();
-    }
-
-    private void closeSocket(boolean announce) {
-        Socket s;
-        synchronized (sendLock) {
-            s = socket;
-            socket = null;
-            out = null;
-        }
-        if (s != null) {
-            try { s.close(); } catch (IOException ignored) { }
-            if (announce) {
-                JSObject ev = new JSObject();
-                ev.put("state", "disconnected");
-                notifyListeners("state", ev);
-            }
-        }
     }
 
     // ------------------------------------------------------------------ Beenden und Löschen
@@ -349,7 +383,7 @@ public class TorChatPlugin extends Plugin {
     }
 
     private void shutdownTor() {
-        closeSocket(false);
+        closeAll();
         progressRunning = false;
         try {
             TorService t = torService;
