@@ -1,0 +1,11 @@
+{
+  "appId": "chat.uki.app",
+  "appName": "UKI CHAT",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  },
+  "plugins": {}
+}

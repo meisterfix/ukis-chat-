@@ -1,0 +1,4 @@
+node_modules/
+*.apk
+*.jks
+.DS_Store
