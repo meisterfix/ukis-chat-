@@ -125,6 +125,10 @@ async function tryUnlock() {
   let rec;
   try { rec = JSON.parse(lsGet(LS_HASH)); } catch (e) { rec = null; }
   if (!rec) { await wipeEverything(); return; }
+  // Den Versuch ZUERST zählen: Wer die App während der Prüfung abwürgt, bekommt keinen Gratis-Versuch.
+  const fails = (parseInt(lsGet(LS_FAILS) || '0', 10) || 0) + 1;
+  lsSet(LS_FAILS, String(fails));
+  if (lsGet(LS_FAILS) !== String(fails)) { await wipeEverything(); return; }
   $('lock-btn').disabled = true;
   const hash = await pbkdf2(pw, unb64(rec.s), rec.i);
   $('lock-btn').disabled = false;
@@ -135,8 +139,6 @@ async function tryUnlock() {
     unlocked();
     return;
   }
-  const fails = (parseInt(lsGet(LS_FAILS) || '0', 10) || 0) + 1;
-  lsSet(LS_FAILS, String(fails));
   if (fails >= CFG.MAX_ATTEMPTS) {
     await wipeEverything();
     toast('3 falsche Versuche: Die App wurde vollständig zurückgesetzt.', 5000);
@@ -597,6 +599,8 @@ async function onFrame(frame, conn) {
   const ch = channel;
   if (!ch || !ch.keys || frame.length < 1) return;
   if (ch.active && conn !== ch.active && !ch.pending.has(conn)) return;
+  // Noch nicht ausgewiesene Verbindungen dürfen nur kleine Einzelpakete schicken (Schutz vor Speicher-Flutung).
+  if (conn !== ch.active && (frame[0] !== 0 || frame.length > 8192)) return rejectFrom(conn);
   let st = ch.rx.get(conn);
   const t = frame[0];
   if (t === 0) return handlePacket(frame.subarray(1), conn);
@@ -813,6 +817,7 @@ function renderMessage(m, body) {
         // Android-WebView kann keine Blob-Downloads: Datei kurz im App-Cache ablegen und öffnen (wird beim Verlassen gelöscht)
         a.addEventListener('click', (e) => {
           e.preventDefault();
+          if (!window.confirm('Dokument mit einer anderen App öffnen? Öffne nur Dateien, die du erwartest.')) return;
           native.openFile({ data: b64(body), name: m.name || 'Dokument', mime: safeMime(m.mime) }).catch(() => toast('Keine App zum Öffnen gefunden.'));
         });
       }
@@ -1056,4 +1061,5 @@ if (native) {
 }
 
 wire();
-show(lsGet(LS_HASH) ? 'screen-lock' : 'screen-setup', { push: false });
+if (lsGet(LS_HASH) && (parseInt(lsGet(LS_FAILS) || '0', 10) || 0) >= CFG.MAX_ATTEMPTS) wipeEverything();
+else show(lsGet(LS_HASH) ? 'screen-lock' : 'screen-setup', { push: false });

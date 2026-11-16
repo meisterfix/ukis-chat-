@@ -3,32 +3,60 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
   <meta name="referrer" content="no-referrer">
-  <meta name="theme-color" content="#0b1220">
+  <meta name="theme-color" content="#070b16">
   <title>UKI CHAT</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Symbole -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <linearGradient id="g-brand" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#7c5cff"/><stop offset="1" stop-color="#22d3ee"/>
+      </linearGradient>
+      <symbol id="i-logo" viewBox="0 0 64 64">
+        <path d="M32 4 9 13v17c0 14.5 9.8 25.6 23 30 13.2-4.4 23-15.5 23-30V13L32 4z" fill="url(#g-brand)"/>
+        <path d="M20 23.5c0-2.5 2-4.5 4.5-4.5h15c2.5 0 4.5 2 4.5 4.5v9c0 2.5-2 4.5-4.5 4.5H31l-6.5 5.5V37h0c-2.5 0-4.5-2-4.5-4.5v-9z" fill="#070b16" opacity=".88"/>
+        <circle cx="26.5" cy="28" r="2" fill="#22d3ee"/><circle cx="32" cy="28" r="2" fill="#a78bfa"/><circle cx="37.5" cy="28" r="2" fill="#22d3ee"/>
+      </symbol>
+      <symbol id="i-qr" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2M14 18v2h2M18 18h2v2"/></symbol>
+      <symbol id="i-scan" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16"/></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6l-8-3zM12 11v5M12 8v.01"/></symbol>
+      <symbol id="i-reset" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+      <symbol id="i-back" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M15 5l-7 7 7 7"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></symbol>
+      <symbol id="i-clip" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7"/></symbol>
+      <symbol id="i-smile" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M8 14.5c1 1.3 2.4 2 4 2s3-.7 4-2M9 9.5v.01M15 9.5v.01"/></g></symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M9 6a3 3 0 0 1 6 0v6a3 3 0 0 1-6 0zM5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12 2-12 2z"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6l-8-3zM9 12l2 2 4-4"/></symbol>
+    </defs>
+  </svg>
+
   <!-- Ersteinrichtung: Passwort festlegen -->
-  <section id="screen-setup" class="screen" hidden>
+  <section id="screen-setup" class="screen hero" hidden>
     <div class="center-card">
-      <div class="logo">&#128274;</div>
-      <h1>UKI CHAT</h1>
+      <svg class="logo"><use href="#i-logo"/></svg>
+      <h1 class="brand">UKI <span>CHAT</span></h1>
+      <p class="tagline">Privat. Anonym. Spurlos.</p>
       <p class="muted">Lege ein Passwort aus Wörtern fest. Keine Zahlen. Mindestens 4 Wörter und 20 Zeichen.</p>
-      <p class="muted small">Dieses Passwort lässt sich nicht wiederherstellen. Nach 3 falschen Eingaben wird die App vollständig zurückgesetzt.</p>
       <input id="setup-pw1" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="z. B. Wolke Tisch Sommer Fluss Lampe">
       <input id="setup-pw2" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Passwort wiederholen">
       <p id="setup-error" class="error" hidden></p>
       <button id="setup-btn" class="primary">Passwort festlegen</button>
+      <p class="muted small">Das Passwort lässt sich nicht wiederherstellen. Nach 3 falschen Eingaben wird die App vollständig gelöscht.</p>
     </div>
   </section>
 
   <!-- Entsperren -->
-  <section id="screen-lock" class="screen" hidden>
+  <section id="screen-lock" class="screen hero" hidden>
     <div class="center-card">
-      <div class="logo">&#128274;</div>
-      <h1>UKI CHAT</h1>
+      <svg class="logo"><use href="#i-logo"/></svg>
+      <h1 class="brand">UKI <span>CHAT</span></h1>
+      <p class="tagline">Privat. Anonym. Spurlos.</p>
       <input id="lock-pw" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Passwort">
       <p id="lock-error" class="error" hidden></p>
       <button id="lock-btn" class="primary">Entsperren</button>
@@ -37,22 +65,30 @@
 
   <!-- Hauptmenü -->
   <section id="screen-menu" class="screen" hidden>
-    <header class="bar"><span class="title">UKI CHAT</span><button id="menu-lock" class="icon" title="Sperren">&#128274;</button></header>
+    <header class="bar">
+      <svg class="bar-logo"><use href="#i-logo"/></svg>
+      <span class="title brand-sm">UKI <span>CHAT</span></span>
+      <button id="menu-lock" class="icon" title="Sperren"><svg><use href="#i-lock"/></svg></button>
+    </header>
     <div class="menu">
+      <div class="status-card">
+        <svg><use href="#i-shield"/></svg>
+        <div><b>Geschützt</b><br><span class="muted small">Ende-zu-Ende-verschlüsselt · anonym über Tor · nichts wird gespeichert</span></div>
+      </div>
       <button id="btn-new" class="tile">
-        <span class="tile-icon">&#9638;</span>
+        <span class="tile-icon violet"><svg><use href="#i-qr"/></svg></span>
         <span><b>Mein Code</b><br><span class="muted small">Neuen Kanal öffnen und deinen Code zeigen</span></span>
       </button>
       <button id="btn-scan" class="tile">
-        <span class="tile-icon">&#128247;</span>
+        <span class="tile-icon cyan"><svg><use href="#i-scan"/></svg></span>
         <span><b>Code scannen</b><br><span class="muted small">Den Code deines Partners scannen</span></span>
       </button>
       <button id="btn-info" class="tile">
-        <span class="tile-icon">&#9432;</span>
-        <span><b>So funktioniert es</b><br><span class="muted small">Sicherheit und Grenzen</span></span>
+        <span class="tile-icon blue"><svg><use href="#i-info"/></svg></span>
+        <span><b>So funktioniert es</b><br><span class="muted small">Schutz, Löschung und Tipps</span></span>
       </button>
       <button id="btn-reset" class="tile danger">
-        <span class="tile-icon">&#9888;</span>
+        <span class="tile-icon red"><svg><use href="#i-reset"/></svg></span>
         <span><b>App zurücksetzen</b><br><span class="muted small">Löscht Passwort und alles andere</span></span>
       </button>
     </div>
@@ -60,8 +96,9 @@
 
   <!-- Kanal-Passwort -->
   <section id="screen-chpw" class="screen" hidden>
-    <header class="bar"><button class="icon back" data-back>&#8592;</button><span class="title">Kanal-Passwort</span></header>
+    <header class="bar"><button class="icon back" data-back><svg><use href="#i-back"/></svg></button><span class="title">Kanal-Passwort</span></header>
     <div class="center-card">
+      <div class="step-icon"><svg><use href="#i-lock"/></svg></div>
       <p class="muted">Vereinbart ein gemeinsames Kanal-Passwort und sagt es euch mündlich. Beide müssen dasselbe eingeben, sonst öffnet sich der Kanal nicht.</p>
       <input id="chpw" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Kanal-Passwort">
       <p id="chpw-error" class="error" hidden></p>
@@ -71,7 +108,7 @@
 
   <!-- QR anzeigen -->
   <section id="screen-show" class="screen" hidden>
-    <header class="bar"><button class="icon back" data-back>&#8592;</button><span class="title" id="show-title">Mein Code</span></header>
+    <header class="bar"><button class="icon back" data-back><svg><use href="#i-back"/></svg></button><span class="title" id="show-title">Mein Code</span></header>
     <div class="center-card">
       <p class="muted" id="show-hint"></p>
       <div id="qr-box" class="qr-box"></div>
@@ -82,10 +119,10 @@
 
   <!-- Scanner -->
   <section id="screen-scan" class="screen" hidden>
-    <header class="bar"><button class="icon back" data-back>&#8592;</button><span class="title" id="scan-title">Code scannen</span></header>
+    <header class="bar"><button class="icon back" data-back><svg><use href="#i-back"/></svg></button><span class="title" id="scan-title">Code scannen</span></header>
     <div class="scan-wrap">
       <video id="scan-video" playsinline muted></video>
-      <div class="scan-frame"></div>
+      <div class="scan-frame"><i></i><i></i><i></i><i></i><div class="scan-line"></div></div>
     </div>
     <p class="muted small center" id="scan-status">Halte die Kamera auf den Code deines Partners.</p>
   </section>
@@ -93,38 +130,51 @@
   <!-- Chat -->
   <section id="screen-chat" class="screen" hidden>
     <header class="bar">
-      <button id="chat-leave" class="icon" title="Kanal verlassen">&#10005;</button>
-      <span class="title">Partner <span id="chat-fp" class="fp"></span></span>
-      <span id="chat-state" class="state">verbunden</span>
+      <button id="chat-leave" class="icon" title="Kanal verlassen"><svg><use href="#i-close"/></svg></button>
+      <div class="chat-head">
+        <span class="title">Partner</span>
+        <span id="chat-state" class="state">verbunden</span>
+      </div>
+      <span id="chat-fp" class="fp" title="Sicherheits-Symbole"></span>
     </header>
     <div id="chat-banner" class="banner" hidden></div>
     <div id="messages" class="messages"></div>
     <div id="emoji-panel" class="emoji-panel" hidden></div>
     <div id="rec-bar" class="rec-bar" hidden><span class="dot"></span> Aufnahme <span id="rec-time">0:00</span> <button id="rec-cancel" class="small-btn">Verwerfen</button><button id="rec-send" class="small-btn primary">Senden</button></div>
     <footer class="composer">
-      <button id="btn-attach" class="icon" title="Bild oder Dokument">&#128206;</button>
-      <button id="btn-emoji" class="icon" title="Emoji">&#128512;</button>
+      <button id="btn-attach" class="icon" title="Bild oder Dokument"><svg><use href="#i-clip"/></svg></button>
+      <button id="btn-emoji" class="icon" title="Emoji"><svg><use href="#i-smile"/></svg></button>
       <textarea id="input" rows="1" placeholder="Nachricht" autocomplete="off" autocapitalize="sentences" spellcheck="false"></textarea>
-      <button id="btn-mic" class="icon" title="Sprachnachricht">&#127908;</button>
-      <button id="btn-send" class="icon send" title="Senden">&#10148;</button>
+      <button id="btn-mic" class="icon" title="Sprachnachricht"><svg><use href="#i-mic"/></svg></button>
+      <button id="btn-send" class="icon send" title="Senden"><svg><use href="#i-send"/></svg></button>
       <input id="file-input" type="file" hidden>
     </footer>
   </section>
 
   <!-- Info -->
   <section id="screen-info" class="screen" hidden>
-    <header class="bar"><button class="icon back" data-back>&#8592;</button><span class="title">So funktioniert es</span></header>
+    <header class="bar"><button class="icon back" data-back><svg><use href="#i-back"/></svg></button><span class="title">So funktioniert es</span></header>
     <div class="info">
-      <h3>Verbindung</h3>
-      <p>Zwei Geräte scannen gegenseitig ihre Codes. Dabei werden die anonymen Tor-Adressen und die Schlüssel direkt von Bildschirm zu Kamera übertragen, ohne Server. Danach verbinden sich die Geräte über das Tor-Netz: Jede Nachricht läuft verschlüsselt über mehrere fremde Zwischenstationen, von denen keine beide Seiten kennt, keine mitlesen kann und keine etwas speichert. Keiner von euch sieht die IP-Adresse oder das Gerät des anderen. Bei jedem App-Start entsteht eine neue Tor-Adresse.</p>
-      <h3>Verschlüsselung</h3>
-      <p>Jede Nachricht, jedes Bild und jede Sprachnachricht wird mit einem eigenen Schlüssel verschlüsselt (AES-256-GCM). Jeder Schlüssel wird nach Gebrauch verworfen. Zusätzlich verschlüsselt das Tor-Netz die Verbindung mehrfach. Ohne das gemeinsame Kanal-Passwort entsteht kein Schlüssel.</p>
-      <h3>Sicherheitscode</h3>
-      <p>Oben im Chat stehen Symbole. Bei euch beiden müssen dieselben Symbole stehen. Sind sie verschieden, hört jemand mit: Kanal sofort verlassen.</p>
-      <h3>Löschung</h3>
-      <p>Nichts wird gespeichert. Nachrichten liegen nur im Arbeitsspeicher und werden nach spätestens 60 Minuten gelöscht. Verlässt einer den Kanal oder schließt die App, ist alles weg.</p>
-      <h3>Grenzen dieser Testversion</h3>
-      <p>Der Chat läuft nur, solange beide die App geöffnet oder im Hintergrund haben. Wird die App geschlossen, ist der Kanal weg und es muss neu gescannt werden. Der erste Verbindungsaufbau über Tor dauert meist einige Sekunden bis etwa eine Minute. Bildschirmfotos sind in der App gesperrt; ein zweites Handy, das den Bildschirm abfotografiert, kann keine App verhindern. Ein gehacktes Gerät kann niemand schützen. Diese Testversion wurde noch nicht unabhängig geprüft.</p>
+      <div class="info-card">
+        <h3>Verbindung</h3>
+        <p>Zwei Geräte scannen gegenseitig ihre Codes. Dabei werden die anonymen Tor-Adressen und die Schlüssel direkt von Bildschirm zu Kamera übertragen, ohne Server. Danach verbinden sich die Geräte über das Tor-Netz: Jede Nachricht läuft verschlüsselt über mehrere Zwischenstationen, von denen keine beide Seiten kennt, keine mitlesen kann und keine etwas speichert. Keiner von euch sieht die IP-Adresse oder das Gerät des anderen. Bei jedem App-Start entsteht eine neue Tor-Adresse.</p>
+      </div>
+      <div class="info-card">
+        <h3>Verschlüsselung</h3>
+        <p>Jede Nachricht, jedes Bild und jede Sprachnachricht wird mit einem eigenen Schlüssel verschlüsselt (AES-256-GCM). Jeder Schlüssel wird nach Gebrauch verworfen. Zusätzlich verschlüsselt das Tor-Netz die Verbindung mehrfach. Ohne das gemeinsame Kanal-Passwort entsteht kein Schlüssel.</p>
+      </div>
+      <div class="info-card">
+        <h3>Sicherheits-Symbole</h3>
+        <p>Oben rechts im Chat stehen Symbole. Bei euch beiden müssen dieselben Symbole stehen. Sind sie verschieden, hört jemand mit: Kanal sofort verlassen.</p>
+      </div>
+      <div class="info-card">
+        <h3>Löschung</h3>
+        <p>Nichts wird gespeichert. Nachrichten liegen nur im Arbeitsspeicher und werden nach spätestens 60 Minuten gelöscht. Verlässt einer den Kanal oder schließt die App, ist alles weg.</p>
+      </div>
+      <div class="info-card">
+        <h3>Gut zu wissen</h3>
+        <p>Der Chat läuft, solange beide die App geöffnet oder im Hintergrund haben. Wird die App geschlossen, muss neu gescannt werden. Der erste Verbindungsaufbau über Tor dauert meist einige Sekunden bis etwa eine Minute. Bildschirmfotos sind in der App gesperrt, und die Tastatur darf keine Wörter lernen. Öffne nur Dokumente, die du erwartest.</p>
+      </div>
     </div>
   </section>
 

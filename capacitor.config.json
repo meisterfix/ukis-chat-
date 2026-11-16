@@ -4,8 +4,10 @@
   "webDir": "www",
   "android": {
     "allowMixedContent": false,
-    "captureInput": true,
-    "webContentsDebuggingEnabled": false
+    "captureInput": false,
+    "webContentsDebuggingEnabled": false,
+    "loggingBehavior": "none"
   },
-  "plugins": {}
+  "plugins": {},
+  "backgroundColor": "#0b1220"
 }
