@@ -215,8 +215,9 @@ function beep() {
 
 // ---------------------------------------------------------------- Transport
 // Android: natives Tor-Plugin. Browser: Test-Transport zwischen zwei Tabs.
-const native = (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform())
-  ? window.Capacitor.Plugins.TorChat : null;
+const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const native = isNative ? window.Capacitor.registerPlugin('TorChat') : null;
+const AppPlugin = isNative ? window.Capacitor.registerPlugin('App') : null;
 
 function makeNativeTransport() {
   const handlers = { data: () => {}, state: () => {}, progress: () => {} };
@@ -944,7 +945,7 @@ async function goBack() {
 
 if (native) {
   // Android-Zurück-Taste
-  try { window.Capacitor.Plugins.App && window.Capacitor.Plugins.App.addListener('backButton', () => { if (currentScreen !== 'screen-chat' && currentScreen !== 'screen-lock' && currentScreen !== 'screen-setup') goBack(); }); } catch (e) { /* ignore */ }
+  try { AppPlugin.addListener('backButton', () => { if (currentScreen !== 'screen-chat' && currentScreen !== 'screen-lock' && currentScreen !== 'screen-setup') goBack(); }); } catch (e) { /* ignore */ }
 }
 
 wire();
