@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -54,3 +54,22 @@ jobs:
           name: UKI-CHAT-test-apk
           path: UKI-CHAT-test.apk
           retention-days: 14
+
+      - name: APK als Download-Version veröffentlichen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="test-${{ github.run_number }}"
+          gh release create "$TAG" UKI-CHAT-test.apk --repo "${{ github.repository }}" \
+            --title "UKI CHAT Testversion ${{ github.run_number }}" --prerelease \
+            --notes "Testversion. Vor dem Aktualisieren die alte Version deinstallieren."
+
+      - name: APK zusätzlich im Zweig apk-builds ablegen
+        run: |
+          mkdir /tmp/apkbranch && cp UKI-CHAT-test.apk /tmp/apkbranch/ && cd /tmp/apkbranch
+          git init -q -b apk-builds
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add UKI-CHAT-test.apk
+          git commit -q -m "APK aus Lauf ${{ github.run_number }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" apk-builds
