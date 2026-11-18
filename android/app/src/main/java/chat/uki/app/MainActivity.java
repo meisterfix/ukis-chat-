@@ -12,5 +12,7 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
         // Keine Bildschirmfotos, keine Bildschirmaufnahmen, kein Vorschaubild in der App-Übersicht.
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
+        // Abgelaufenen Kanalzustand sofort löschen (falls der Wecker verpasst wurde).
+        StateStore.purgeExpired(this);
     }
 }

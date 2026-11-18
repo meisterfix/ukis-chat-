@@ -17,7 +17,10 @@ const CFG = {
   CHANNEL_ITER: 300000,                // PBKDF2-Runden für das Kanal-Passwort
   MAX_ATTEMPTS: 3,
   AUTOLOCK_MS: 2 * 60 * 1000,          // nach 2 Minuten im Hintergrund wieder sperren
-  MAX_SKIP: 200,
+  MAX_SKIP: 200,                       // so viele übersprungene Schlüssel werden höchstens aufgehoben
+  MAX_GAP: 5000,                       // so weit darf die Schlüsselkette nach einer Störung nachziehen
+  CHANNEL_IDLE_MS: 12 * 60 * 60 * 1000, // Kanal schließt sich 12 Stunden nach der letzten Nachricht
+  CTL_MAX_AGE_MS: 24 * 60 * 60 * 1000, // Lebenszeichen älter als das werden nicht angenommen
 };
 
 const LS_HASH = 'siegel.pw';
@@ -75,13 +78,32 @@ function show(id, { push = true } = {}) {
 function goMenu() { backStack.length = 0; show('screen-menu', { push: false }); }
 
 // ---------------------------------------------------------------- Passwort und Sperre
+// Erlaubt sind alle Zeichen: Buchstaben groß und klein, Zahlen, Sonderzeichen, Leerzeichen, Umlaute.
+// Kurze Passwörter (unter 16 Zeichen) müssen gemischt sein, lange Sätze dürfen einfach sein.
+function passwordKinds(pw) {
+  return [/\p{Ll}/u, /\p{Lu}/u, /\p{Nd}/u, /[^\p{L}\p{Nd}\s]/u].filter((r) => r.test(pw)).length;
+}
 function validatePassword(pw) {
-  if (/[0-9]/.test(pw)) return 'Bitte keine Zahlen verwenden, nur Wörter.';
-  const words = pw.trim().split(/\s+/).filter((w) => w.length >= 2);
-  if (words.length < 4) return 'Bitte mindestens 4 Wörter verwenden.';
-  if (pw.trim().length < 20) return 'Bitte mindestens 20 Zeichen verwenden.';
+  const len = [...pw].length;
+  if (len < 10) return 'Bitte mindestens 10 Zeichen verwenden.';
+  if (len > 200) return 'Das Passwort ist zu lang (höchstens 200 Zeichen).';
+  if (pw !== pw.trim()) return 'Bitte am Anfang und Ende keine Leerzeichen.';
+  if (len < 16 && passwordKinds(pw) < 3) return 'Bitte mischen: mindestens 3 von 4 Arten (klein, GROSS, Zahl, Zeichen wie !?#), oder einen Satz mit 16 Zeichen oder mehr.';
+  if (/^(.)\1+$/u.test(pw)) return 'Bitte nicht nur ein Zeichen wiederholen.';
   return null;
 }
+
+// Aus dem Login-Passwort entstehen zwei getrennte Werte: ein Prüfwert (gespeichert) und ein
+// Tresor-Schlüssel (nie gespeichert), mit dem der offene Kanal verschlüsselt aufbewahrt wird.
+async function deriveLogin(pw, salt, iter) {
+  const raw = await pbkdf2(pw, salt, iter);
+  const ikm = await subtle.importKey('raw', raw, 'HKDF', false, ['deriveBits', 'deriveKey']);
+  wipeBytes(raw);
+  const verifier = new Uint8Array(await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode('uki-login-verify') }, ikm, 256));
+  const vault = await subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode('uki-login-vault') }, ikm, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  return { verifier, vault };
+}
+let vaultKey = null;
 
 async function pbkdf2(pw, salt, iter, bits = 256) {
   const key = await subtle.importKey('raw', enc.encode(pw.normalize('NFC')), 'PBKDF2', false, ['deriveBits']);
@@ -109,8 +131,9 @@ async function setupPassword() {
   $('setup-btn').disabled = true;
   $('setup-btn').textContent = 'Wird gesichert …';
   const salt = rand(16);
-  const hash = await pbkdf2(p1, salt, CFG.LOGIN_ITER);
-  lsSet(LS_HASH, JSON.stringify({ s: b64(salt), h: b64(hash), i: CFG.LOGIN_ITER }));
+  const lg = await deriveLogin(p1, salt, CFG.LOGIN_ITER);
+  vaultKey = lg.vault;
+  lsSet(LS_HASH, JSON.stringify({ v: 2, s: b64(salt), h: b64(lg.verifier), i: CFG.LOGIN_ITER }));
   lsSet(LS_FAILS, '0');
   $('setup-pw1').value = ''; $('setup-pw2').value = '';
   $('setup-btn').disabled = false;
@@ -124,17 +147,18 @@ async function tryUnlock() {
   if (!pw) return;
   let rec;
   try { rec = JSON.parse(lsGet(LS_HASH)); } catch (e) { rec = null; }
-  if (!rec) { await wipeEverything(); return; }
+  if (!rec || rec.v !== 2) { await wipeEverything(); return; }
   // Den Versuch ZUERST zählen: Wer die App während der Prüfung abwürgt, bekommt keinen Gratis-Versuch.
   const fails = (parseInt(lsGet(LS_FAILS) || '0', 10) || 0) + 1;
   lsSet(LS_FAILS, String(fails));
   if (lsGet(LS_FAILS) !== String(fails)) { await wipeEverything(); return; }
   $('lock-btn').disabled = true;
-  const hash = await pbkdf2(pw, unb64(rec.s), rec.i);
+  const lg = await deriveLogin(pw, unb64(rec.s), rec.i);
   $('lock-btn').disabled = false;
   $('lock-pw').value = '';
-  if (timingSafeEqual(hash, unb64(rec.h))) {
+  if (timingSafeEqual(lg.verifier, unb64(rec.h))) {
     lsSet(LS_FAILS, '0');
+    vaultKey = lg.vault;
     err.hidden = true;
     unlocked();
     return;
@@ -154,7 +178,7 @@ function unlocked() {
   isUnlocked = true;
   unlockAudio();
   if (channel && channel.state !== 'closed' && channel.keys) show('screen-chat', { push: false });
-  else goMenu();
+  else { goMenu(); restoreChannel(); }
 }
 
 function lockApp() {
@@ -166,6 +190,8 @@ function lockApp() {
 
 async function wipeEverything() {
   await leaveChannel({ notify: true, silent: true });
+  vaultKey = null;
+  await clearSavedState();
   try { localStorage.clear(); } catch (e) { /* ignore */ }
   try { sessionStorage.clear(); } catch (e) { /* ignore */ }
   try {
@@ -235,8 +261,10 @@ function makeNativeTransport() {
     onData(cb) { handlers.data = cb; },
     onState(cb) { handlers.state = cb; },
     onProgress(cb) { handlers.progress = cb; },
-    async init() {
-      if (!started) started = native.start().then((r) => r.address).catch((e) => { started = null; throw e; });
+    // key: gespeicherter Schlüssel der eigenen Tor-Adresse (nur nach einer Wiederherstellung)
+    async init(key) {
+      if (key) { started = native.start({ key }).then((r) => ({ address: r.address, key: r.key })).catch((e) => { started = null; throw e; }); return started; }
+      if (!started) started = native.start().then((r) => ({ address: r.address, key: r.key })).catch((e) => { started = null; throw e; });
       return started;
     },
     async listen() { await native.listen(); },
@@ -281,10 +309,11 @@ function makeLoopbackTransport() {
     onData(cb) { handlers.data = cb; },
     onState(cb) { handlers.state = cb; },
     onProgress(cb) { handlers.progress = cb; },
-    async init() {
+    async init(key) {
       if (!bc) throw new Error('Dieser Browser kann den Testmodus nicht.');
+      if (key) me = key;
       if (!me) { handlers.progress(100, 'Testmodus'); me = 'test' + randId().toLowerCase() + '.local'; }
-      return me;
+      return { address: me, key: me };
     },
     async listen() {},
     async connect(addr) { const id = nextId++; conns.set(id, addr); bc.postMessage({ t: 'hello', to: addr, from: me }); },
@@ -332,6 +361,7 @@ async function deriveChannelKeys(myPriv, myPub, theirPub, channelPw, iAmA) {
   const pwKey = await pbkdf2(channelPw, transcript, CFG.CHANNEL_ITER);
   const ikm = await subtle.importKey('raw', concat(shared, pwKey), 'HKDF', false, ['deriveBits']);
   const okm = new Uint8Array(await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: transcript, info: enc.encode('siegel-chains') }, ikm, 512));
+  const ctl = new Uint8Array(await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: transcript, info: enc.encode('uki-control') }, ikm, 256));
   wipeBytes(shared); wipeBytes(pwKey);
   const chainAB = okm.slice(0, 32);
   const chainBA = okm.slice(32, 64);
@@ -339,8 +369,36 @@ async function deriveChannelKeys(myPriv, myPub, theirPub, channelPw, iAmA) {
   return {
     send: { chain: iAmA ? chainAB : chainBA, n: 0 },
     recv: { chain: iAmA ? chainBA : chainAB, n: 0, skipped: new Map() },
+    ctl,
+    ctlSeen: new Map(),
     fingerprint: fingerprintSymbols(await sha256(concat(enc.encode('siegel-fp'), pubA, pubB))),
   };
+}
+
+/*
+ * Lebenszeichen ("hallo", "ping") laufen NICHT über die Schlüsselkette, sondern mit einem eigenen
+ * Kanalschlüssel. So bringt eine lange Funkstille (Handy gesperrt, kein Netz) die Kette nie aus dem Takt.
+ * Schutz vor Wiederholung: Zeitstempel plus Zufallswert, jeder Wert wird nur einmal angenommen.
+ */
+const CTL_MARK = 0xffffffff;
+async function encryptControl(keys, type) {
+  const iv = rand(12);
+  const k = await subtle.importKey('raw', keys.ctl, 'AES-GCM', false, ['encrypt']);
+  const body = enc.encode(JSON.stringify({ type, t: Date.now(), r: b64(rand(12)) }));
+  const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: u32(CTL_MARK) }, k, body));
+  return concat(u32(CTL_MARK), iv, ct);
+}
+async function decryptControl(keys, packet) {
+  const k = await subtle.importKey('raw', keys.ctl, 'AES-GCM', false, ['decrypt']);
+  const plain = new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: packet.subarray(4, 16), additionalData: u32(CTL_MARK) }, k, packet.subarray(16)));
+  const m = JSON.parse(dec.decode(plain));
+  if (!m || (m.type !== 'hello' && m.type !== 'ping') || typeof m.t !== 'number' || typeof m.r !== 'string') throw new Error('ctl');
+  const now = Date.now();
+  if (Math.abs(now - m.t) > CFG.CTL_MAX_AGE_MS) throw new Error('alt');
+  if (keys.ctlSeen.has(m.r)) throw new Error('replay');
+  keys.ctlSeen.set(m.r, m.t);
+  if (keys.ctlSeen.size > 6000) for (const [r, t] of keys.ctlSeen) if (now - t > CFG.CTL_MAX_AGE_MS || keys.ctlSeen.size > 6000) keys.ctlSeen.delete(r);
+  return m;
 }
 
 const FP_SYMBOLS = ['🍎','🍋','🍇','🍒','🥝','🌽','🥕','🍄','🌵','🌲','🌻','🌙','⭐','🔥','💧','❄️','⚡','🌈','🐶','🐱','🦊','🐻','🐼','🐸','🐙','🦋','🐝','🐢','🦉','🐳','🚀','⚓','🎈','🎸','🎲','🔑','💎','🔔','📌','🧭','⛵','🏠','🗻','🧩','🎯','🪁','🧲','🌀'];
@@ -380,11 +438,16 @@ async function decryptPayload(keys, packet) {
     if (!mk) throw new Error('replay');
     r.skipped.delete(n);
   } else {
-    if (n - r.n > CFG.MAX_SKIP) throw new Error('too far');
+    if (n - r.n > CFG.MAX_GAP) throw new Error('too far');
     let chain = r.chain;
     let i = r.n;
     const newSkipped = [];
     while (i < n) {
+      if (n - i > CFG.MAX_SKIP) {
+        // Weit zurückliegende Schlüssel werden nicht aufgehoben, nur die Kette wird nachgezogen.
+        chain = await hmac(chain, new Uint8Array([2])); i++;
+        continue;
+      }
       const s = await ratchetStep(chain);
       newSkipped.push([i, s.mk]);
       chain = s.next; i++;
@@ -432,7 +495,11 @@ function newChannel(role, channelPw) {
     lastRx: 0,
     warned: false,
     reconnectTimer: null,
+    reconnectDelay: 8000,
     createdAt: Date.now(),
+    lastMsgAt: Date.now(),  // letzte Nachricht (gesendet oder empfangen): bestimmt, wann der Kanal schließt
+    onionKey: null,         // Schlüssel der eigenen Tor-Adresse (nur im Speicher, im Tresor verschlüsselt)
+    savedAddr: null,
   };
 }
 
@@ -476,10 +543,14 @@ transport.onProgress((p, summary) => {
 });
 
 async function ensureAddress() {
-  if (channel.myAddr) return channel.myAddr;
-  channel.myAddr = await transport.init();
+  const ch = channel;
+  if (ch.myAddr) return ch.myAddr;
+  const r = await transport.init(ch.onionKey);
+  if (ch.onionKey && ch.savedAddr && r.address !== ch.savedAddr) throw new Error('Tor-Adresse konnte nicht wiederhergestellt werden');
+  ch.myAddr = r.address;
+  ch.onionKey = r.key || null;
   await transport.listen();
-  return channel.myAddr;
+  return ch.myAddr;
 }
 
 async function showMyCode(title, hint) {
@@ -547,13 +618,15 @@ function connectToPeer() {
   const ch = channel;
   if (!ch || ch.state === 'closed' || ch.role !== 'A' || ch.active) return;
   setChatState('verbinde …', true);
-  transport.connect(ch.peerAddr).catch(() => scheduleReconnect());
+  ensureAddress().then(() => transport.connect(ch.peerAddr)).catch(() => scheduleReconnect());
 }
 function scheduleReconnect() {
   const ch = channel;
   if (!ch || ch.state === 'closed' || ch.role !== 'A') return;
   clearTimeout(ch.reconnectTimer);
-  ch.reconnectTimer = setTimeout(connectToPeer, 8000);
+  ch.reconnectTimer = setTimeout(connectToPeer, ch.reconnectDelay);
+  // Ist der Partner länger weg (Handy aus, kein Netz), wird seltener versucht: bis höchstens jede Minute.
+  ch.reconnectDelay = Math.min(60000, Math.round(ch.reconnectDelay * 1.5));
 }
 
 transport.onState((state, conn) => {
@@ -562,7 +635,7 @@ transport.onState((state, conn) => {
   if (state === 'connected') {
     // Noch nicht vertrauenswürdig: Hallo schicken und auf ein gültiges Paket der Gegenseite warten.
     ch.pending.set(conn, { fails: 0, since: Date.now() });
-    enqueue({ head: { type: 'hello', id: randId() }, body: null, notify: false, conn });
+    enqueue({ ctl: 'hello', conn });
     setTimeout(() => {
       if (channel === ch && ch.pending.has(conn)) { ch.pending.delete(conn); transport.drop(conn).catch(() => {}); }
     }, 60000);
@@ -679,8 +752,13 @@ async function pumpQueue() {
       const conn = job.conn || ch.active;
       if (!conn) continue; // nicht verbunden: bleibt im Postausgang und wird später erneut gesendet
       try {
-        const packet = await encryptPayload(ch.keys, encodePayload(job.head, job.body));
-        await sendPacket(packet, job.notify, conn);
+        if (job.ctl) {
+          await sendPacket(await encryptControl(ch.keys, job.ctl), false, conn);
+        } else {
+          const packet = await encryptPayload(ch.keys, encodePayload(job.head, job.body));
+          await persist(); // Kettenstand sichern, BEVOR gesendet wird
+          await sendPacket(packet, job.notify, conn);
+        }
       } catch (e) { /* bei Verbindungsabbruch wird später erneut gesendet */ }
     }
   } finally { sending = false; if (sendIdleResolve) sendIdleResolve(); }
@@ -696,11 +774,15 @@ function sendControl(head) {
 async function handlePacket(packet, conn) {
   const ch = channel;
   if (!ch || !ch.keys || packet.length < 17) return rejectFrom(conn);
-  let plain;
-  try { plain = await decryptPayload(ch.keys, packet); } catch (e) { return rejectFrom(conn); }
-  let msg;
-  try { msg = decodePayload(plain); } catch (e) { return rejectFrom(conn); }
-  const { head, body } = msg;
+  let head = null, body = null;
+  if (readU32(packet, 0) === CTL_MARK) {
+    try { head = await decryptControl(ch.keys, packet); } catch (e) { return rejectFrom(conn); }
+  } else {
+    let plain;
+    try { plain = await decryptPayload(ch.keys, packet); } catch (e) { return rejectFrom(conn); }
+    try { ({ head, body } = decodePayload(plain)); } catch (e) { return rejectFrom(conn); }
+    persist();
+  }
   // Gültig verschlüsselt: diese Verbindung gehört zum echten Partner.
   if (ch.active !== conn) {
     if (ch.state !== 'open') openChat();
@@ -708,6 +790,7 @@ async function handlePacket(packet, conn) {
     ch.pending.delete(conn);
     transport.promote(conn).catch(() => {});
     clearTimeout(ch.reconnectTimer);
+    ch.reconnectDelay = 8000;
     setChatState('verbunden', false);
     // Unbestätigte Nachrichten erneut senden
     for (const p of ch.outbox.values()) enqueue(p);
@@ -730,6 +813,7 @@ async function handlePacket(packet, conn) {
       sendControl({ type: 'ack', id: head.id });
       if (ch.seen.has(head.id)) return;
       ch.seen.add(head.id);
+      touchChannel();
       renderMessage({ ...head, mine: false }, body);
       beep();
       return;
@@ -741,7 +825,7 @@ async function handlePacket(packet, conn) {
 setInterval(() => {
   const ch = channel;
   if (!ch || !ch.keys || !ch.active || ch.state === 'closed') return;
-  sendControl({ type: 'ping' });
+  enqueue({ ctl: 'ping' });
   if (ch.lastRx && Date.now() - ch.lastRx > 70000) {
     const dead = ch.active;
     ch.active = null;
@@ -752,23 +836,135 @@ setInterval(() => {
 }, 20000);
 
 // ---------------------------------------------------------------- Chat-Oberfläche
+let lastStateText = '';
+let lastStateWarn = false;
 function setChatState(text, warn) {
+  lastStateText = text; lastStateWarn = !!warn;
   const s = $('chat-state');
-  s.textContent = text;
+  const ch = channel;
+  s.textContent = ch && ch.state === 'open' ? `${text} · offen bis ${fmtTime(channelDeadline(ch))}` : text;
   s.classList.toggle('warn', !!warn);
 }
 
-function openChat() {
+// ---------------------------------------------------------------- Lebensdauer des Kanals
+// Nachrichten: höchstens 60 Minuten. Kanal: bleibt offen, solange geschrieben wird, und schließt sich
+// 12 Stunden nach der letzten Nachricht von selbst, auf beiden Handys, auch wenn eines offline ist.
+function channelDeadline(ch) { return ch.lastMsgAt + CFG.CHANNEL_IDLE_MS; }
+function touchChannel() {
+  const ch = channel;
+  if (!ch || ch.state !== 'open') return;
+  ch.lastMsgAt = Date.now();
+  setChatState(lastStateText, lastStateWarn);
+  persist();
+}
+
+// ---------------------------------------------------------------- Tresor: offener Kanal übersteht Neustart
+/*
+ * Damit ein Kanal 12 Stunden hält, auch wenn Android die App im Hintergrund beendet, wird NUR der
+ * Kanalzustand (Schlüssel, Tor-Adresse, Ablaufzeit) verschlüsselt im privaten App-Speicher abgelegt.
+ * Verschlüsselt mit einem Schlüssel aus dem Login-Passwort, der nie gespeichert wird. Ohne Passwort
+ * ist die Datei wertlos. Nachrichten werden NICHT gespeichert. Läuft der Kanal ab, löscht Android
+ * die Datei per Wecker, auch wenn die App gar nicht läuft.
+ */
+const STATE_AAD = enc.encode('uki-state-v1');
+const store = native ? {
+  save: (data, expires) => native.saveState({ data, expires }),
+  load: () => native.loadState().then((r) => r && r.data ? r.data : null),
+  clear: () => native.clearState(),
+} : {
+  // Browser-Testmodus
+  save: async (data, expires) => { try { sessionStorage.setItem('uki.state', JSON.stringify({ data, expires })); } catch (e) { /* ignore */ } },
+  load: async () => { try { const o = JSON.parse(sessionStorage.getItem('uki.state')); return o && o.expires > Date.now() ? o.data : null; } catch (e) { return null; } },
+  clear: async () => { try { sessionStorage.removeItem('uki.state'); } catch (e) { /* ignore */ } },
+};
+
+let saveChain = Promise.resolve();
+function persist() {
+  const ch = channel;
+  saveChain = saveChain.then(async () => {
+    if (!vaultKey || !ch || channel !== ch || ch.state !== 'open' || !ch.keys) return;
+    const k = ch.keys;
+    const st = {
+      v: 1, role: ch.role, peer: ch.peerAddr, addr: ch.myAddr || ch.savedAddr,
+      okey: ch.role === 'B' ? ch.onionKey : null,
+      fp: k.fingerprint, last: ch.lastMsgAt, verified: ch.verified,
+      s: { c: b64(k.send.chain), n: k.send.n },
+      r: { c: b64(k.recv.chain), n: k.recv.n, sk: [...k.recv.skipped].map(([n, mk]) => [n, b64(mk)]) },
+      ctl: b64(k.ctl),
+    };
+    const iv = rand(12);
+    const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: STATE_AAD }, vaultKey, enc.encode(JSON.stringify(st))));
+    await store.save(b64(concat(iv, ct)), channelDeadline(ch));
+  }).catch(() => {});
+  return saveChain;
+}
+async function clearSavedState() {
+  await saveChain;
+  try { await store.clear(); } catch (e) { /* ignore */ }
+}
+
+async function restoreChannel() {
+  if (channel || !vaultKey) return;
+  let st;
+  try {
+    const data = await store.load();
+    if (!data) return;
+    const raw = unb64(data);
+    const plain = await subtle.decrypt({ name: 'AES-GCM', iv: raw.subarray(0, 12), additionalData: STATE_AAD }, vaultKey, raw.subarray(12));
+    st = JSON.parse(dec.decode(new Uint8Array(plain)));
+  } catch (e) { await clearSavedState(); return; }
+  if (!st || st.v !== 1 || st.last + CFG.CHANNEL_IDLE_MS <= Date.now() || channel) { await clearSavedState(); return; }
+  const ch = newChannel(st.role, null);
+  ch.peerAddr = st.peer;
+  ch.savedAddr = st.addr;
+  ch.onionKey = st.okey || null;
+  ch.lastMsgAt = st.last;
+  ch.verified = !!st.verified;
+  ch.keys = {
+    send: { chain: unb64(st.s.c), n: st.s.n },
+    recv: { chain: unb64(st.r.c), n: st.r.n, skipped: new Map(st.r.sk.map(([n, mk]) => [n, unb64(mk)])) },
+    ctl: unb64(st.ctl), ctlSeen: new Map(), fingerprint: st.fp,
+  };
+  // Sicherheitsabstand: Falls die App kurz vor dem Speichern beendet wurde, nie einen Zähler doppelt verwenden.
+  for (let i = 0; i < 16; i++) { ch.keys.send.chain = await hmac(ch.keys.send.chain, new Uint8Array([2])); ch.keys.send.n++; }
+  channel = ch;
+  openChat({ restored: true });
+  persist();
+  try { await ensureAddress(); } catch (e) {
+    addSys('Die anonyme Verbindung konnte nicht wiederhergestellt werden. Bitte den Kanal neu aufbauen.');
+    return;
+  }
+  if (ch.role === 'A') connectToPeer();
+}
+
+// Alle 5 Sekunden prüfen, ob der Kanal abgelaufen ist
+setInterval(() => {
+  const ch = channel;
+  if (!ch || ch.state !== 'open') return;
+  if (Date.now() >= channelDeadline(ch)) {
+    leaveChannel({ notify: true }).then(() => toast('Der Kanal wurde nach 12 Stunden ohne Nachricht geschlossen und gelöscht.', 5000));
+  }
+}, 5000);
+
+function openChat({ restored = false } = {}) {
   const ch = channel;
   ch.state = 'open';
+  if (!restored) ch.lastMsgAt = Date.now();
   $('messages').innerHTML = '';
   $('chat-fp').textContent = ch.keys ? ch.keys.fingerprint : '';
   $('chat-banner').hidden = false;
   $('chat-banner').textContent = 'Vergleicht die Symbole oben. Sind sie bei euch beiden gleich, hört niemand mit.';
   backStack.length = 0;
   show('screen-chat', { push: false });
-  addSys('Kanal geöffnet. Nachrichten werden nach spätestens 60 Minuten gelöscht.');
+  if (restored) {
+    $('chat-banner').textContent = 'Kanal wiederhergestellt. Frühere Nachrichten wurden nicht gespeichert.';
+    addSys('Kanal wiederhergestellt. Er schließt sich 12 Stunden nach der letzten Nachricht.');
+  } else {
+    addSys('Kanal geöffnet. Nachrichten löschen sich nach 60 Minuten. Der Kanal schließt sich 12 Stunden nach der letzten Nachricht.');
+  }
   setChatState(ch.role === 'A' ? 'verbinde …' : 'warte …', true);
+  persist();
+  if (native && native.keepAwake) native.keepAwake().catch(() => {});
 }
 
 function addSys(text) {
@@ -856,6 +1052,7 @@ async function sendText() {
   const head = { type: 'text', id: randId(), text };
   renderMessage({ ...head, mine: true });
   sendPayload({ head, body: null, notify: true });
+  touchChannel();
 }
 
 async function sendFile(file) {
@@ -866,6 +1063,7 @@ async function sendFile(file) {
   const head = { type, id: randId(), name: file.name, mime: file.type || 'application/octet-stream' };
   renderMessage({ ...head, mine: true }, body);
   sendPayload({ head, body, notify: true });
+  touchChannel();
 }
 
 // Selbstlöschung
@@ -896,6 +1094,7 @@ async function leaveChannel({ notify = true, silent = false } = {}) {
   }
   ch.state = 'closed';
   clearTimeout(ch.reconnectTimer);
+  await clearSavedState();
   ch.messages.forEach((m) => m.urls.forEach((u) => URL.revokeObjectURL(u)));
   ch.messages = [];
   ch.outbox.clear();
@@ -985,6 +1184,7 @@ function finishRecording() {
     const head = { type: 'audio', id: randId(), mime: (r.mr.mimeType || 'audio/webm').split(';')[0] };
     renderMessage({ ...head, mine: true }, body);
     sendPayload({ head, body, notify: true });
+  touchChannel();
   };
   clearInterval(r.timer);
   try { r.mr.stop(); } catch (e) { /* ignore */ }

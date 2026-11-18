@@ -6,6 +6,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.media.Ringtone;
 import android.media.RingtoneManager;
 import android.net.Uri;
@@ -52,7 +54,8 @@ import java.util.regex.Pattern;
 
 /**
  * Anonymer Transport über Tor-Onion-Dienste.
- * Jedes Gerät bekommt pro App-Start eine neue, flüchtige .onion-Adresse (der Schlüssel wird nicht gespeichert).
+ * Jedes Gerät bekommt eine neue .onion-Adresse. Der Schlüssel dazu geht nur an den JavaScript-Teil, der ihn
+ * für einen offenen Kanal verschlüsselt (mit dem Login-Passwort) aufbewahrt, damit der Kanal einen Neustart übersteht.
  * Die Geräte verbinden sich über das Tor-Netz; keiner erfährt die IP-Adresse des anderen.
  * Rahmenformat auf der Leitung: [4 Byte Länge][1 Byte Ton ja/nein][Daten]. Die Daten sind bereits
  * Ende-zu-Ende-verschlüsselt (das macht der JavaScript-Teil).
@@ -71,6 +74,8 @@ public class TorChatPlugin extends Plugin {
     private BroadcastReceiver statusReceiver;
     private volatile boolean torOn = false;
     private volatile String onionHost;
+    private volatile String onionKey;
+    private volatile String requestedKey;
     private volatile ServerSocket serverSocket;
     private static final int MAX_CONNS = 6;
     private final AtomicInteger nextConn = new AtomicInteger(1);
@@ -94,11 +99,19 @@ public class TorChatPlugin extends Plugin {
     // ------------------------------------------------------------------ Tor starten
     @PluginMethod
     public void start(PluginCall call) {
-        if (onionHost != null) {
+        String key = call.getString("key", null);
+        if (key != null && !key.matches("^ED25519-V3:[A-Za-z0-9+/=]{40,120}$")) { call.reject("Ungültiger Schlüssel"); return; }
+        if (onionHost != null && (key == null || key.equals(onionKey))) {
             JSObject r = new JSObject();
             r.put("address", onionHost);
+            r.put("key", onionKey);
             call.resolve(r);
             return;
+        }
+        requestedKey = key;
+        if (onionHost != null) {
+            // Andere Adresse gewünscht (Wiederherstellung): alte Adresse abbauen
+            removeOnion();
         }
         if (pendingStart != null) {
             pendingStart.reject("Tor startet bereits");
@@ -191,9 +204,14 @@ public class TorChatPlugin extends Plugin {
                 Map<Integer, String> ports = new HashMap<>();
                 ports.put(VIRTUAL_PORT, "127.0.0.1:" + ss.getLocalPort());
                 // NEW:ED25519-V3 = neue Adresse; DiscardPK = privater Schlüssel wird nicht zurückgegeben/gespeichert
-                Map<String, String> res = control.addOnion("NEW:ED25519-V3", ports, true, false);
+                // Der Schlüssel wird von Tor nicht auf die Festplatte geschrieben (flüchtiger Dienst ohne "Detach").
+                String want = requestedKey;
+                Map<String, String> res = want != null
+                        ? control.addOnion(want, ports, false, false)
+                        : control.addOnion("NEW:ED25519-V3", ports, false, false);
                 String addr = res.get(TorControlCommands.HS_ADDRESS);
                 if (addr == null) throw new IOException("Keine Onion-Adresse erhalten");
+                onionKey = want != null ? want : res.get(TorControlCommands.HS_PRIVKEY);
                 onionHost = addr + ".onion";
                 startAcceptLoop(ss);
             }
@@ -204,6 +222,7 @@ public class TorChatPlugin extends Plugin {
             if (call != null) {
                 JSObject r = new JSObject();
                 r.put("address", onionHost);
+                r.put("key", onionKey);
                 call.resolve(r);
             }
         } catch (Exception e) {
@@ -382,9 +401,8 @@ public class TorChatPlugin extends Plugin {
         call.resolve();
     }
 
-    private void shutdownTor() {
+    private synchronized void removeOnion() {
         closeAll();
-        progressRunning = false;
         try {
             TorService t = torService;
             String host = onionHost;
@@ -393,9 +411,16 @@ public class TorChatPlugin extends Plugin {
             }
         } catch (Exception ignored) { }
         onionHost = null;
+        onionKey = null;
         ServerSocket ss = serverSocket;
         serverSocket = null;
         if (ss != null) try { ss.close(); } catch (IOException ignored) { }
+    }
+
+    private void shutdownTor() {
+        progressRunning = false;
+        removeOnion();
+        requestedKey = null;
         Context ctx = getContext();
         if (serviceConnection != null) {
             try { ctx.unbindService(serviceConnection); } catch (Exception ignored) { }
@@ -415,6 +440,7 @@ public class TorChatPlugin extends Plugin {
     @PluginMethod
     public void wipe(PluginCall call) {
         shutdownTor();
+        StateStore.clear(getContext());
         getActivity().runOnUiThread(() -> {
             try {
                 getBridge().getWebView().clearCache(true);
@@ -465,6 +491,57 @@ public class TorChatPlugin extends Plugin {
         if (kids != null) for (File k : kids) deleteRecursive(k, true);
         if (self) //noinspection ResultOfMethodCallIgnored
             f.delete();
+    }
+
+    // ------------------------------------------------------------------ Verschlüsselter Kanalzustand
+    @PluginMethod
+    public void saveState(PluginCall call) {
+        String data = call.getString("data", "");
+        Double exp = call.getDouble("expires");
+        if (data == null || data.length() > 2_000_000 || exp == null) { call.reject("Ungültig"); return; }
+        long expires = exp.longValue();
+        io.execute(() -> {
+            try {
+                StateStore.save(getContext(), data, expires);
+                call.resolve();
+            } catch (Exception e) {
+                call.reject("Speichern fehlgeschlagen");
+            }
+        });
+    }
+
+    @PluginMethod
+    public void loadState(PluginCall call) {
+        io.execute(() -> {
+            JSObject r = new JSObject();
+            String d = StateStore.load(getContext());
+            if (d != null) r.put("data", d);
+            call.resolve(r);
+        });
+    }
+
+    @PluginMethod
+    public void clearState(PluginCall call) {
+        io.execute(() -> {
+            StateStore.clear(getContext());
+            call.resolve();
+        });
+    }
+
+    // ------------------------------------------------------------------ Hintergrund
+    // Bittet Android einmal, die App vom Akkusparen auszunehmen, damit der Kanal bei gesperrtem Handy hält.
+    @PluginMethod
+    public void keepAwake(PluginCall call) {
+        try {
+            Context ctx = getContext();
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            if (Build.VERSION.SDK_INT >= 23 && pm != null && !pm.isIgnoringBatteryOptimizations(ctx.getPackageName())) {
+                Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                i.setData(Uri.parse("package:" + ctx.getPackageName()));
+                getActivity().startActivity(i);
+            }
+        } catch (Exception ignored) { }
+        call.resolve();
     }
 
     // ------------------------------------------------------------------ Ton

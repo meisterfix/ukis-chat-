@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.ServiceCompat;
@@ -23,6 +24,7 @@ public class KeepAliveService extends Service {
 
     private static final String CHANNEL = "uki_keepalive";
     private static final int ID = 4747;
+    private PowerManager.WakeLock wakeLock;
 
     public static void start(Context ctx) {
         try {
@@ -66,7 +68,23 @@ public class KeepAliveService extends Service {
         } catch (Exception e) {
             stopSelf();
         }
+        // Hält den Prozessor wach, damit Tor und der Kanal auch bei gesperrtem Bildschirm weiterlaufen.
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (pm != null && wakeLock == null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "uki:channel");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire(13L * 60 * 60 * 1000); // höchstens 13 Stunden
+            }
+        } catch (Exception ignored) { }
         return START_NOT_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Exception ignored) { }
+        wakeLock = null;
+        super.onDestroy();
     }
 
     @Override
